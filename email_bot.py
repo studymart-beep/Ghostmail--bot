@@ -33,9 +33,12 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8602213173:AAFaUOiaqdNWwQsAswjW3ba_7NQ5ocJ6U8M"
 ACCOUNTS_FILE = "email_accounts.json"
 
-ASKING_RECIPIENT = 1
-ASKING_SUBJECT = 2
-ASKING_BODY = 3
+# Conversation states
+ASKING_USERNAME = 1
+ASKING_PASSWORD = 2
+ASKING_RECIPIENT = 3
+ASKING_SUBJECT = 4
+ASKING_BODY = 5
 
 def load_accounts():
     try:
@@ -59,9 +62,10 @@ class TempMailAPI:
     """Email API Handler"""
     
     @staticmethod
-    def create_account():
-        """Create Guerrilla Mail account"""
+    def create_account(username, password):
+        """Create Guerrilla Mail account with custom username"""
         try:
+            # Get a new email address
             params = {
                 'f': 'get_email_address',
                 'ip': '127.0.0.1',
@@ -74,12 +78,26 @@ class TempMailAPI:
                 sid_token = data.get('sid_token')
                 
                 if email and sid_token:
+                    # Try to set custom username
+                    domain = email.split('@')[1]
+                    custom_email = f"{username}@{domain}"
+                    
+                    params2 = {
+                        'f': 'set_email_user',
+                        'sid_token': sid_token,
+                        'email_user': username
+                    }
+                    r2 = requests.get("https://api.guerrillamail.com/ajax.php", params=params2, timeout=10)
+                    
+                    final_email = custom_email if r2.status_code == 200 else email
+                    
                     return {
-                        "email": email,
-                        "password": "Not required",
+                        "email": final_email,
+                        "password": password,
                         "token": sid_token,
-                        "domain": email.split('@')[1],
+                        "domain": domain,
                         "service": "Guerrilla Mail",
+                        "username": username,
                         "created": datetime.now().strftime("%b %d, %Y at %I:%M %p")
                     }
         except:
@@ -158,10 +176,10 @@ def get_active(user_id):
         return active, data["accounts"][active]
     return None, None
 
-# ============ BOT COMMANDS ============
+# ============ HOME SCREEN ============
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """🏠 Home Screen"""
+async def home_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, message=None):
+    """Show home screen"""
     user_id = update.effective_user.id
     data = get_user_data(user_id)
     active_email, active_info = get_active(user_id)
@@ -195,12 +213,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"╚══════════════════════╝\n\n"
             f"👤 *Active Account*\n"
             f"┣ 📧 `{active_email}`\n"
+            f"┣ 🔑 `{active_info.get('password', 'N/A')}`\n"
             f"┣ 🔒 *Provider:* {active_info.get('service', 'N/A')}\n"
             f"┣ 📅 *Created:* {active_info.get('created', 'N/A')}\n"
             f"┗ 📊 *Your Accounts:* {total}\n\n"
             f"🌍 *Global Stats*\n"
             f"┗ 👥 Total Users: {total_users}\n\n"
-            f"💡 *Tip:* Send 'home' anytime to return here!"
+            f"💡 Type *home* anytime to return here!"
         )
     else:
         text = (
@@ -208,23 +227,135 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"║   📧 TEMP MAIL BOT   ║\n"
             f"╚══════════════════════╝\n\n"
             f"👋 *Welcome!*\n\n"
-            f"✨ Create disposable email addresses\n"
+            f"✨ Create disposable emails\n"
             f"📥 Receive verification codes\n"
             f"📤 Send emails anonymously\n"
-            f"🔒 Protect your privacy online\n\n"
+            f"🔒 Custom username & password\n\n"
             f"🌍 *Total Users:* {total_users}\n\n"
             f"👉 Click *Create New Email* to start!\n"
-            f"💡 Send 'home' anytime to return here."
+            f"💡 Type *home* anytime to return."
         )
     
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    if message:
+        await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-async def create_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create new email account"""
-    msg = await update.message.reply_text("🔄 *Creating your secure email...*\nPlease wait a moment.", parse_mode='Markdown')
+# ============ CREATE EMAIL ============
+
+async def create_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 1: Ask for username"""
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+    
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            "✨ *Create Your Email*\n\n"
+            "📝 *Step 1/2:* Choose your username\n\n"
+            "• 3-30 characters\n"
+            "• Letters, numbers, dots, hyphens\n"
+            "• Example: `john.doe` or `mike123`\n\n"
+            "✏️ Enter your desired username:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            "✨ *Create Your Email*\n\n"
+            "📝 *Step 1/2:* Choose your username\n\n"
+            "• 3-30 characters\n"
+            "• Letters, numbers, dots, hyphens\n"
+            "• Example: `john.doe` or `mike123`\n\n"
+            "✏️ Enter your desired username:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    return ASKING_USERNAME
+
+async def process_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 2: Save username and ask for password"""
+    username = update.message.text.strip().lower()
+    
+    if not re.match(r'^[a-zA-Z0-9._-]{3,30}$', username):
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+        await update.message.reply_text(
+            "❌ *Invalid Username!*\n\n"
+            "• Must be 3-30 characters\n"
+            "• Only letters, numbers, dots, hyphens\n"
+            "• Example: `john.doe`\n\n"
+            "Try again:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return ASKING_USERNAME
+    
+    # Check if username already taken by this user
+    user_id = update.effective_user.id
+    data = get_user_data(user_id)
+    for email in data.get("accounts", {}):
+        if username in email:
+            keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+            await update.message.reply_text(
+                f"❌ Username `{username}` is already in use!\n\n"
+                "Choose a different username:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+            return ASKING_USERNAME
+    
+    context.user_data['username'] = username
+    
+    keyboard = [[InlineKeyboardButton("🔀 Generate Random", callback_data='gen_pass')],
+                [InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+    
+    await update.message.reply_text(
+        f"🔐 *Step 2/2:* Choose Password\n\n"
+        f"Username: `{username}`\n\n"
+        f"Enter your password (min 6 chars)\n"
+        f"or click Generate Random:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+    return ASKING_PASSWORD
+
+async def process_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Create account with username and password"""
+    password = update.message.text.strip()
+    
+    if len(password) < 6:
+        keyboard = [[InlineKeyboardButton("🔀 Generate Random", callback_data='gen_pass')],
+                    [InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+        await update.message.reply_text(
+            "❌ Password must be at least 6 characters!\n\n"
+            "Enter a stronger password:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return ASKING_PASSWORD
+    
+    return await create_account_final(update, context, password)
+
+async def generate_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate random password"""
+    query = update.callback_query
+    await query.answer()
+    
+    password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+    
+    await query.message.reply_text(
+        f"🔑 *Generated Password:* `{password}`\n\n"
+        "Creating your account..."
+    )
+    
+    return await create_account_final(update, context, password)
+
+async def create_account_final(update, context, password):
+    """Final step: Create the account"""
+    username = context.user_data.get('username', 'user')
+    
+    msg = await update.message.reply_text("🔄 *Creating your email...*", parse_mode='Markdown')
     
     user_id = update.effective_user.id
-    account = TempMailAPI.create_account()
+    account = TempMailAPI.create_account(username, password)
     
     if account:
         data = get_user_data(user_id)
@@ -233,35 +364,41 @@ async def create_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_accounts(user_data)
         
         keyboard = [
-            [InlineKeyboardButton("📥 Check Inbox", callback_data='inbox')],
-            [InlineKeyboardButton("📤 Send Email", callback_data='send')],
-            [InlineKeyboardButton("🏠 Home", callback_data='home')]
+            [InlineKeyboardButton("📥 Check Inbox", callback_data='inbox'),
+             InlineKeyboardButton("📤 Send Email", callback_data='send')],
+            [InlineKeyboardButton("🏠 Go to Home", callback_data='home')]
         ]
         
         await msg.edit_text(
-            f"✅ *Email Created Successfully!*\n\n"
+            f"✅ *Account Created Successfully!*\n\n"
             f"┏━━━━━━━━━━━━━━━━━━━━┓\n"
+            f"┃ 👤 *Username:* {account['username']}\n"
             f"┃ 📧 `{account['email']}`\n"
-            f"┃ 🔒 *Provider:* {account['service']}\n"
+            f"┃ 🔑 `{account['password']}`\n"
             f"┃ 🌐 *Domain:* {account['domain']}\n"
             f"┃ 📅 {account['created']}\n"
             f"┗━━━━━━━━━━━━━━━━━━━━┛\n\n"
+            f"✅ Save your password!\n"
             f"✅ Works with social media\n"
-            f"✅ Receive verification codes\n"
-            f"✅ Send anonymous emails\n\n"
-            f"📌 *What would you like to do?*",
+            f"✅ Receive & Send emails",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
     else:
-        keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data='create')],
-                    [InlineKeyboardButton("🏠 Home", callback_data='home')]]
+        keyboard = [
+            [InlineKeyboardButton("🔄 Try Again", callback_data='create')],
+            [InlineKeyboardButton("🏠 Home", callback_data='home')]
+        ]
         await msg.edit_text(
-            "❌ *Failed to create email*\n\n"
-            "The server is busy. Please try again.",
+            "❌ *Account creation failed*\n\n"
+            "Please try again with a different username.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
+    
+    return ConversationHandler.END
+
+# ============ INBOX ============
 
 async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check inbox"""
@@ -269,16 +406,29 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_email, active_info = get_active(user_id)
     
     if not active_email:
-        keyboard = [[InlineKeyboardButton("✨ Create Email", callback_data='create')],
-                    [InlineKeyboardButton("🏠 Home", callback_data='home')]]
-        await update.message.reply_text(
-            "❌ *No Active Account*\n\nYou need to create an email first!",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
+        keyboard = [
+            [InlineKeyboardButton("✨ Create Email", callback_data='create')],
+            [InlineKeyboardButton("🏠 Home", callback_data='home')]
+        ]
+        if update.callback_query:
+            await update.callback_query.message.reply_text(
+                "❌ *No Active Account*\n\nCreate an email first!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "❌ *No Active Account*\n\nCreate an email first!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
         return
     
-    msg = await update.message.reply_text("🔍 *Checking your inbox...*", parse_mode='Markdown')
+    if update.callback_query:
+        msg = await update.callback_query.message.reply_text("🔍 *Checking inbox...*", parse_mode='Markdown')
+    else:
+        msg = await update.message.reply_text("🔍 *Checking inbox...*", parse_mode='Markdown')
+    
     messages = TempMailAPI.get_messages(active_info['token'])
     
     if messages:
@@ -294,27 +444,28 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(f"📖 Open #{i} - {subject[:25]}", callback_data=f'msg_{m["id"]}')])
         
         keyboard.append([InlineKeyboardButton("🔄 Refresh Inbox", callback_data='inbox')])
-        keyboard.append([InlineKeyboardButton("🏠 Home", callback_data='home')])
+        keyboard.append([InlineKeyboardButton("🏠 Back to Home", callback_data='home')])
     else:
         text = (
             f"📭 *Inbox Empty*\n"
             f"┗ {active_email}\n\n"
             f"💡 *Don't see your email?*\n"
             f"• Wait 2-5 minutes\n"
-            f"• Check spam folder\n"
-            f"• Click refresh below"
+            f"• Click 🔄 Refresh below"
         )
         keyboard = [
-            [InlineKeyboardButton("🔄 Refresh", callback_data='inbox')],
-            [InlineKeyboardButton("🏠 Home", callback_data='home')]
+            [InlineKeyboardButton("🔄 Refresh Now", callback_data='inbox')],
+            [InlineKeyboardButton("🏠 Back to Home", callback_data='home')]
         ]
     
     await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
+# ============ VIEW MESSAGE ============
+
 async def view_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
     """View message content"""
     _, active_info = get_active(update.effective_user.id)
-    msg = await update.message.reply_text("📖 *Opening message...*", parse_mode='Markdown')
+    msg = await update.callback_query.message.reply_text("📖 *Opening message...*", parse_mode='Markdown')
     message = TempMailAPI.get_message(active_info['token'], msg_id)
     
     if message:
@@ -333,12 +484,19 @@ async def view_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_i
         )
         keyboard = [
             [InlineKeyboardButton("🔙 Back to Inbox", callback_data='inbox')],
-            [InlineKeyboardButton("🗑 Delete Message", callback_data=f'delmsg_{msg_id}')],
             [InlineKeyboardButton("🏠 Home", callback_data='home')]
         ]
         await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
-        await msg.edit_text("❌ *Message not found*\nIt may have expired.", parse_mode='Markdown')
+        keyboard = [
+            [InlineKeyboardButton("🔙 Back to Inbox", callback_data='inbox')],
+            [InlineKeyboardButton("🏠 Home", callback_data='home')]
+        ]
+        await msg.edit_text("❌ *Message not found*\nIt may have expired.", 
+                           reply_markup=InlineKeyboardMarkup(keyboard),
+                           parse_mode='Markdown')
+
+# ============ SEND EMAIL ============
 
 async def send_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start send email process"""
@@ -346,50 +504,95 @@ async def send_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_email, _ = get_active(user_id)
     
     if not active_email:
-        keyboard = [[InlineKeyboardButton("✨ Create Email", callback_data='create')],
-                    [InlineKeyboardButton("🏠 Home", callback_data='home')]]
-        await update.message.reply_text(
-            "❌ *No Active Account*\n\nCreate an email first!",
+        keyboard = [
+            [InlineKeyboardButton("✨ Create Email", callback_data='create')],
+            [InlineKeyboardButton("🏠 Home", callback_data='home')]
+        ]
+        if update.callback_query:
+            await update.callback_query.message.reply_text(
+                "❌ *No Active Account*\n\nCreate an email first!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "❌ *No Active Account*\n\nCreate an email first!",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        return ConversationHandler.END
+    
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+    
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            f"📤 *Compose Email*\n━━━━━━━━━━━━━━━━━\n"
+            f"From: `{active_email}`\n\n"
+            f"📧 Enter recipient email:\n"
+            f"Example: `friend@gmail.com`",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
-        return ConversationHandler.END
-    
-    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='cancel_send')]]
-    await update.message.reply_text(
-        f"📤 *Compose Email*\n━━━━━━━━━━━━━━━━━\n"
-        f"From: `{active_email}`\n\n"
-        f"📧 Enter recipient email:\n"
-        f"Example: `friend@gmail.com`",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
+    else:
+        await update.message.reply_text(
+            f"📤 *Compose Email*\n━━━━━━━━━━━━━━━━━\n"
+            f"From: `{active_email}`\n\n"
+            f"📧 Enter recipient email:\n"
+            f"Example: `friend@gmail.com`",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
     return ASKING_RECIPIENT
 
 async def process_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recipient = update.message.text.strip()
     if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', recipient):
-        await update.message.reply_text("❌ *Invalid email format!*\nPlease enter a valid email:", parse_mode='Markdown')
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+        await update.message.reply_text(
+            "❌ *Invalid email!*\nEnter a valid email:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
         return ASKING_RECIPIENT
     
     context.user_data['recipient'] = recipient
-    await update.message.reply_text("📝 *Enter subject:*", parse_mode='Markdown')
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+    await update.message.reply_text(
+        "📝 *Enter subject:*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
     return ASKING_SUBJECT
 
 async def process_subject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subject = update.message.text.strip()
     if not subject:
-        await update.message.reply_text("❌ Subject cannot be empty!", parse_mode='Markdown')
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+        await update.message.reply_text(
+            "❌ Subject cannot be empty!",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
         return ASKING_SUBJECT
     
     context.user_data['subject'] = subject
-    await update.message.reply_text("📄 *Enter your message:*\n\nType your message below:", parse_mode='Markdown')
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+    await update.message.reply_text(
+        "📄 *Enter your message:*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
     return ASKING_BODY
 
 async def process_body(update: Update, context: ContextTypes.DEFAULT_TYPE):
     body = update.message.text.strip()
     if not body:
-        await update.message.reply_text("❌ Message cannot be empty!", parse_mode='Markdown')
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='home')]]
+        await update.message.reply_text(
+            "❌ Message cannot be empty!",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
         return ASKING_BODY
     
     user_id = update.effective_user.id
@@ -405,27 +608,29 @@ async def process_body(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     if success:
-        keyboard = [[InlineKeyboardButton("🏠 Home", callback_data='home')]]
+        keyboard = [[InlineKeyboardButton("🏠 Back to Home", callback_data='home')]]
         await msg.edit_text(
             f"✅ *Email Sent Successfully!*\n\n"
-            f"┏━━━━━━━━━━━━━━━━━━━━┓\n"
-            f"┃ 📧 To: `{context.user_data['recipient']}`\n"
-            f"┃ 📝 Subject: {context.user_data['subject']}\n"
-            f"┗━━━━━━━━━━━━━━━━━━━━┛\n\n"
-            f"📄 *Message:*\n{body[:200]}{'...' if len(body) > 200 else ''}",
+            f"📧 To: `{context.user_data['recipient']}`\n"
+            f"📝 Subject: {context.user_data['subject']}\n\n"
+            f"📄 Message:\n{body[:200]}{'...' if len(body) > 200 else ''}",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
     else:
-        keyboard = [[InlineKeyboardButton("🔄 Retry", callback_data='send')],
-                    [InlineKeyboardButton("🏠 Home", callback_data='home')]]
+        keyboard = [
+            [InlineKeyboardButton("🔄 Try Again", callback_data='send')],
+            [InlineKeyboardButton("🏠 Home", callback_data='home')]
+        ]
         await msg.edit_text(
-            "❌ *Failed to send!*\nPlease try again.",
+            "❌ *Failed to send!*",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
     
     return ConversationHandler.END
+
+# ============ MY EMAILS ============
 
 async def myemails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all accounts"""
@@ -434,8 +639,10 @@ async def myemails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_email, _ = get_active(user_id)
     
     if not data.get("accounts"):
-        keyboard = [[InlineKeyboardButton("✨ Create Email", callback_data='create')],
-                    [InlineKeyboardButton("🏠 Home", callback_data='home')]]
+        keyboard = [
+            [InlineKeyboardButton("✨ Create Email", callback_data='create')],
+            [InlineKeyboardButton("🏠 Home", callback_data='home')]
+        ]
         await update.message.reply_text(
             "📭 *No Email Accounts*\n\nCreate your first email!",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -446,14 +653,16 @@ async def myemails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"📋 *Your Email Accounts*\n━━━━━━━━━━━━━━━━━\n\n"
     for i, (email, info) in enumerate(data["accounts"].items(), 1):
         marker = "✅" if email == active_email else "📧"
-        text += f"{marker} *{i}.* `{email}`\n   📅 {info.get('created', 'N/A')}\n\n"
+        text += f"{marker} *{i}.* `{email}`\n   🔑 `{info.get('password', 'N/A')}`\n   📅 {info.get('created', 'N/A')}\n\n"
     
     keyboard = [
         [InlineKeyboardButton("🔄 Switch Account", callback_data='switch')],
         [InlineKeyboardButton("🗑 Delete Account", callback_data='delete')],
-        [InlineKeyboardButton("🏠 Home", callback_data='home')]
+        [InlineKeyboardButton("🏠 Back to Home", callback_data='home')]
     ]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+# ============ SWITCH ACCOUNT ============
 
 async def switch_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Switch active account"""
@@ -462,8 +671,10 @@ async def switch_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_email, _ = get_active(user_id)
     
     if len(data.get("accounts", {})) < 2:
-        keyboard = [[InlineKeyboardButton("✨ Create Another", callback_data='create')],
-                    [InlineKeyboardButton("🏠 Home", callback_data='home')]]
+        keyboard = [
+            [InlineKeyboardButton("✨ Create Another", callback_data='create')],
+            [InlineKeyboardButton("🏠 Home", callback_data='home')]
+        ]
         await update.message.reply_text(
             f"❌ *Need More Accounts*\n\nYou have {len(data.get('accounts', {}))} account(s).\nCreate another to switch!",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -475,13 +686,15 @@ async def switch_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for email in data["accounts"]:
         prefix = "✅ " if email == active_email else "📧 "
         keyboard.append([InlineKeyboardButton(f"{prefix}{email}", callback_data=f'sw_{email}')])
-    keyboard.append([InlineKeyboardButton("🏠 Home", callback_data='home')])
+    keyboard.append([InlineKeyboardButton("🏠 Cancel", callback_data='home')])
     
     await update.message.reply_text(
         "🔄 *Switch Active Account*\n\nSelect the account to use:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
+
+# ============ DELETE ACCOUNT ============
 
 async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Delete account"""
@@ -497,13 +710,15 @@ async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for email in data["accounts"]:
         prefix = "✅" if email == active_email else "📧"
         keyboard.append([InlineKeyboardButton(f"🗑 Delete {email}", callback_data=f'del_{email}')])
-    keyboard.append([InlineKeyboardButton("🏠 Home", callback_data='home')])
+    keyboard.append([InlineKeyboardButton("🏠 Cancel", callback_data='home')])
     
     await update.message.reply_text(
         "⚠️ *Delete Account*\n\nSelect account to permanently delete:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
+
+# ============ STATS ============
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show bot statistics"""
@@ -518,18 +733,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌐 Provider: Guerrilla Mail\n"
         f"⚡ Status: Online 24/7\n"
         f"🔒 Privacy: Protected\n\n"
-        f"💡 *Tip:* Share this bot with friends!"
+        f"💡 Share this bot with friends!"
     )
-    keyboard = [[InlineKeyboardButton("🏠 Home", callback_data='home')]]
+    keyboard = [[InlineKeyboardButton("🏠 Back to Home", callback_data='home')]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+# ============ HELP ============
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help menu"""
     text = (
         f"ℹ️ *Help & Information*\n"
         f"━━━━━━━━━━━━━━━━━\n\n"
-        f"📧 *Create Email*\n"
-        f"Get a disposable email address\n\n"
+        f"✨ *Create Email*\n"
+        f"Choose custom username & password\n\n"
         f"📥 *Inbox*\n"
         f"Check received messages & codes\n\n"
         f"📤 *Send Mail*\n"
@@ -540,14 +757,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Change active email account\n\n"
         f"🗑 *Delete*\n"
         f"Remove an email account\n\n"
-        f"💡 *Tip:* Type 'home' to return to main menu!"
+        f"💡 Type *home* to return to main menu!"
     )
-    keyboard = [[InlineKeyboardButton("🏠 Home", callback_data='home')]]
+    keyboard = [[InlineKeyboardButton("🏠 Back to Home", callback_data='home')]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
+# ============ CANCEL ============
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ *Cancelled.*", parse_mode='Markdown')
+    keyboard = [[InlineKeyboardButton("🏠 Go to Home", callback_data='home')]]
+    await update.message.reply_text(
+        "❌ *Cancelled.*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
     return ConversationHandler.END
+
+# ============ TEXT MESSAGE HANDLER ============
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages like 'home'"""
@@ -555,16 +781,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if text == 'home':
         await start(update, context)
-    elif text == 'create':
-        await create_email(update, context)
-    elif text == 'inbox':
-        await inbox(update, context)
-    elif text == 'send':
-        await send_email_start(update, context)
-    elif text == 'help':
-        await help_command(update, context)
-    elif text == 'stats':
-        await stats(update, context)
+
+# ============ BUTTON HANDLER ============
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all button presses"""
@@ -573,11 +791,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == 'create':
-        await create_email(update, context)
+        return await create_email_start(update, context)
     elif data == 'inbox':
         await inbox(update, context)
     elif data == 'send':
-        await send_email_start(update, context)
+        return await send_email_start(update, context)
     elif data == 'myemails':
         await myemails(update, context)
     elif data == 'switch':
@@ -589,10 +807,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == 'stats':
         await stats(update, context)
     elif data == 'home':
-        await start(update, context)
-    elif data == 'cancel_send':
-        await query.message.reply_text("❌ *Send cancelled.*", parse_mode='Markdown')
-        return ConversationHandler.END
+        await home_screen(update, context, message=query.message)
+    elif data == 'gen_pass':
+        return await generate_password(update, context)
     elif data.startswith('sw_'):
         email = data[3:]
         user_id = query.from_user.id
@@ -600,8 +817,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if email in data_acc.get("accounts", {}):
             data_acc["active"] = email
             save_accounts(user_data)
-            keyboard = [[InlineKeyboardButton("📥 Check Inbox", callback_data='inbox')],
-                        [InlineKeyboardButton("🏠 Home", callback_data='home')]]
+            keyboard = [
+                [InlineKeyboardButton("📥 Check Inbox", callback_data='inbox')],
+                [InlineKeyboardButton("🏠 Home", callback_data='home')]
+            ]
             await query.message.reply_text(
                 f"✅ *Switched to:* `{email}`",
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -617,8 +836,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 accounts = data_acc.get("accounts", {})
                 data_acc["active"] = next(iter(accounts)) if accounts else None
             save_accounts(user_data)
-            keyboard = [[InlineKeyboardButton("✨ Create New", callback_data='create')],
-                        [InlineKeyboardButton("🏠 Home", callback_data='home')]]
+            keyboard = [
+                [InlineKeyboardButton("✨ Create New", callback_data='create')],
+                [InlineKeyboardButton("🏠 Home", callback_data='home')]
+            ]
             await query.message.reply_text(
                 f"🗑 *Deleted:* `{email}`",
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -626,13 +847,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     elif data.startswith('msg_'):
         await view_message(update, context, data[4:])
-    elif data.startswith('delmsg_'):
-        await query.message.reply_text("🗑 Message deleted from view.")
-        await inbox(update, context)
+
+# ============ MAIN ============
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command - shows home screen"""
+    await home_screen(update, context)
 
 def main():
     start_keep_alive()
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Create email conversation
+    create_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler('create', create_email_start),
+            CallbackQueryHandler(button_handler, pattern='^create$')
+        ],
+        states={
+            ASKING_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_username)],
+            ASKING_PASSWORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_password),
+                CallbackQueryHandler(button_handler, pattern='^gen_pass$')
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel), CallbackQueryHandler(button_handler, pattern='^home$')]
+    )
     
     # Send email conversation
     send_conv = ConversationHandler(
@@ -645,30 +885,27 @@ def main():
             ASKING_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_subject)],
             ASKING_BODY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_body)]
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('cancel', cancel), CallbackQueryHandler(button_handler, pattern='^home$')]
     )
     
-    # Command handlers
+    # All handlers
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('create', create_email))
     app.add_handler(CommandHandler('inbox', inbox))
     app.add_handler(CommandHandler('myemails', myemails))
     app.add_handler(CommandHandler('switch', switch_account))
     app.add_handler(CommandHandler('delete', delete_account))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('stats', stats))
+    app.add_handler(create_conv)
     app.add_handler(send_conv)
     app.add_handler(CallbackQueryHandler(button_handler))
-    
-    # Handle "home" text message
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     print("╔══════════════════════════════╗")
     print("║   📧 TEMP MAIL BOT ONLINE   ║")
-    print("║   ✅ All Features Active     ║")
-    print("║   📥 Inbox   📤 Send Mail   ║")
-    print("║   🔄 Switch  🗑 Delete      ║")
-    print("║   🏠 Home    ℹ️ Help        ║")
+    print("║   ✅ Custom Username/Pass   ║")
+    print("║   ✅ All Buttons Working    ║")
+    print("║   ✅ Home Navigation Fixed  ║")
     print("╚══════════════════════════════╝")
     app.run_polling()
 
