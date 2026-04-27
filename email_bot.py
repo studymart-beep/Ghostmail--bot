@@ -525,7 +525,8 @@ def main():
     print("Bot: @ghost_mailbot")
     print("=" * 50)
     
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Fixed: removed allowed_updates parameter
+    app.run_polling()
 
 
 if __name__ == '__main__':
