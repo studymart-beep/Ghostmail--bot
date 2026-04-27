@@ -12,10 +12,15 @@ from telegram.ext import (
     ContextTypes, MessageHandler, filters, ConversationHandler
 )
 
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
+# ✅ YOUR BOT TOKEN
 BOT_TOKEN = "8602213173:AAFaUOiaqdNWwQsAswjW3ba_7NQ5ocJ6U8M"
+
 ACCOUNTS_FILE = "email_accounts.json"
 
 ASKING_USERNAME = 1
@@ -36,199 +41,108 @@ def save_accounts(data):
     try:
         with open(ACCOUNTS_FILE, 'w') as f:
             json.dump(data, f, indent=2)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Save error: {e}")
 
 user_data = load_accounts()
 
-# ============ MULTIPLE EMAIL PROVIDERS ============
+class EmailAPI:
+    BASE = "https://api.mail.tm"
 
-def create_mailtm(username):
-    """mail.tm - multiple domain attempts"""
-    try:
-        r = requests.get("https://api.mail.tm/domains", timeout=10)
-        if r.status_code != 200:
-            return None
-        domains = r.json().get('hydra:member', [])
-        if not domains:
-            return None
-        
-        # Try each domain until one works
-        for domain_obj in domains:
-            domain = domain_obj['domain']
+    @staticmethod
+    def create_account(username):
+        try:
+            r = requests.get(f"{EmailAPI.BASE}/domains", timeout=10)
+            if r.status_code != 200:
+                return None
+            domains = r.json().get('hydra:member', [])
+            if not domains:
+                return None
+
+            domain = domains[0]['domain']
             email = f"{username}@{domain}"
             password = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
-            
+
             r = requests.post(
-                "https://api.mail.tm/accounts",
+                f"{EmailAPI.BASE}/accounts",
                 json={"address": email, "password": password},
                 headers={"Content-Type": "application/json"},
                 timeout=10
             )
-            if r.status_code in [200, 201]:
-                r = requests.post(
-                    "https://api.mail.tm/token",
-                    json={"address": email, "password": password},
-                    headers={"Content-Type": "application/json"},
-                    timeout=10
-                )
-                if r.status_code == 200:
-                    return {
-                        "email": email,
-                        "password": password,
-                        "token": r.json()['token'],
-                        "domain": domain,
-                        "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "service": "mailtm"
-                    }
-        return None
-    except Exception as e:
-        logger.error(f"Mail.tm error: {e}")
-        return None
+            if r.status_code not in [200, 201]:
+                return None
 
-def create_tempmail_lol(username):
-    """tempmail.lol - better domains"""
-    try:
-        r = requests.get("https://api.tempmail.lol/v2/inbox/create", timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            return {
-                "email": data['address'],
-                "password": "no_password",
-                "token": data['token'],
-                "domain": data['address'].split('@')[1],
-                "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "service": "tempmail_lol"
-            }
-    except:
-        pass
-    return None
-
-def create_mail_gw(username):
-    """mail.gw - reliable domains"""
-    try:
-        r = requests.get("https://api.mail.gw/domains", timeout=10)
-        if r.status_code != 200:
-            return None
-        domains = r.json().get('hydra:member', [])
-        if not domains:
-            return None
-        
-        domain = domains[0]['domain']
-        email = f"{username}@{domain}"
-        password = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
-        
-        r = requests.post(
-            "https://api.mail.gw/accounts",
-            json={"address": email, "password": password},
-            headers={"Content-Type": "application/json"},
-            timeout=10
-        )
-        if r.status_code in [200, 201]:
             r = requests.post(
-                "https://api.mail.gw/token",
+                f"{EmailAPI.BASE}/token",
+                json={"address": email, "password": password},
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+            if r.status_code != 200:
+                return None
+
+            return {
+                "email": email,
+                "password": password,
+                "token": r.json()['token'],
+                "domain": domain,
+                "created": datetime.now().strftime("%Y-%m-%d %H:%M")
+            }
+        except Exception as e:
+            logger.error(f"Create error: {e}")
+            return None
+
+    @staticmethod
+    def refresh_token(email, password):
+        try:
+            r = requests.post(
+                f"{EmailAPI.BASE}/token",
                 json={"address": email, "password": password},
                 headers={"Content-Type": "application/json"},
                 timeout=10
             )
             if r.status_code == 200:
-                return {
-                    "email": email,
-                    "password": password,
-                    "token": r.json()['token'],
-                    "domain": domain,
-                    "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "service": "mailgw"
-                }
+                return r.json()['token']
+        except:
+            pass
         return None
-    except:
-        pass
-    return None
 
-def create_best_email(username):
-    """Try all providers until one works"""
-    # Try tempmail.lol first (best domains)
-    account = create_tempmail_lol(username)
-    if account:
-        logger.info(f"Created with tempmail.lol: {account['email']}")
-        return account
-    
-    # Try mail.gw second
-    account = create_mail_gw(username)
-    if account:
-        logger.info(f"Created with mail.gw: {account['email']}")
-        return account
-    
-    # Try mail.tm last
-    account = create_mailtm(username)
-    if account:
-        logger.info(f"Created with mail.tm: {account['email']}")
-        return account
-    
-    return None
-
-def get_messages(account):
-    """Get messages based on service"""
-    service = account.get('service')
-    
-    if service == 'mailtm' or service == 'mailgw':
+    @staticmethod
+    def get_messages(token):
         try:
-            headers = {"Authorization": f"Bearer {account['token']}"}
-            base = "https://api.mail.tm" if service == 'mailtm' else "https://api.mail.gw"
-            r = requests.get(f"{base}/messages", headers=headers, timeout=10)
+            headers = {"Authorization": f"Bearer {token}"}
+            r = requests.get(f"{EmailAPI.BASE}/messages", headers=headers, timeout=10)
             if r.status_code == 200:
                 return r.json().get('hydra:member', [])
         except:
             pass
-    
-    elif service == 'tempmail_lol':
-        try:
-            r = requests.get(
-                f"https://api.tempmail.lol/v2/inbox?token={account['token']}",
-                timeout=10
-            )
-            if r.status_code == 200:
-                data = r.json()
-                return data.get('emails', [])
-        except:
-            pass
-    
-    return []
+        return []
 
-def get_message_detail(account, msg_id):
-    """Get message detail"""
-    service = account.get('service')
-    
-    if service == 'mailtm' or service == 'mailgw':
+    @staticmethod
+    def get_message(token, msg_id):
         try:
-            headers = {"Authorization": f"Bearer {account['token']}"}
-            base = "https://api.mail.tm" if service == 'mailtm' else "https://api.mail.gw"
-            r = requests.get(f"{base}/messages/{msg_id}", headers=headers, timeout=10)
+            headers = {"Authorization": f"Bearer {token}"}
+            r = requests.get(f"{EmailAPI.BASE}/messages/{msg_id}", headers=headers, timeout=10)
             if r.status_code == 200:
                 return r.json()
         except:
             pass
-    
-    elif service == 'tempmail_lol':
+        return None
+
+    @staticmethod
+    def send_email(token, from_addr, to_addr, subject, body):
         try:
-            r = requests.get(
-                f"https://api.tempmail.lol/v2/inbox?token={account['token']}&id={msg_id}",
-                timeout=10
-            )
-            if r.status_code == 200:
-                data = r.json()
-                if data.get('emails'):
-                    msg = data['emails'][0]
-                    return {
-                        "from": {"address": msg.get('from', 'Unknown')},
-                        "subject": msg.get('subject', 'No subject'),
-                        "text": msg.get('body', msg.get('html', 'No content')),
-                        "html": msg.get('html', '')
-                    }
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            data = {
+                "from": {"address": from_addr},
+                "to": [{"address": to_addr}],
+                "subject": subject,
+                "text": body
+            }
+            r = requests.post(f"{EmailAPI.BASE}/messages", json=data, headers=headers, timeout=10)
+            return r.status_code in [200, 201]
         except:
-            pass
-    
-    return None
+            return False
 
 def get_user_data(user_id):
     user_id = str(user_id)
@@ -257,8 +171,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if total > 0:
         keyboard.append([
             InlineKeyboardButton("📨 Inbox", callback_data='inbox'),
-            InlineKeyboardButton("📋 My Emails", callback_data='myemails')
+            InlineKeyboardButton("📤 Send", callback_data='send')
         ])
+        keyboard.append([InlineKeyboardButton("📋 My Emails", callback_data='myemails')])
     if total > 1:
         keyboard.append([InlineKeyboardButton("🔄 Switch", callback_data='switch')])
     if total > 0:
@@ -271,18 +186,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📧 *Active:* `{active_email}`\n"
             f"🔑 *Password:* `{active_info['password']}`\n"
             f"📊 *Total Accounts:* {total}\n\n"
-            f"✅ Works: TikTok, FB, IG, Snapchat\n"
-            f"✅ Multiple providers for better success\n\n"
+            f"✅ Works: TikTok, FB, IG, Telegram\n"
+            f"✅ Receives: Codes, Links, Verifications\n\n"
+            f"/create - New email\n"
             f"/inbox - Check messages\n"
-            f"/create - New email"
+            f"/myemails - View all accounts"
         )
     else:
         text = (
             f"📧 *Temp Mail Bot*\n\n"
-            f"Welcome! No accounts yet.\n"
-            f"/create to start!\n\n"
-            f"✅ Multiple email providers\n"
-            f"✅ Auto-selects best domain"
+            f"Welcome! Create your first email!\n\n"
+            f"/create to start!"
         )
 
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -292,8 +206,7 @@ async def create_account_start(update: Update, context: ContextTypes.DEFAULT_TYP
         "➕ *Create New Email*\n\n"
         "Enter username (3-30 chars):\n"
         "Example: `john2024`\n\n"
-        "🔄 Trying multiple providers...\n"
-        "Or /cancel",
+        "Or /cancel to abort",
         parse_mode='Markdown'
     )
     return ASKING_USERNAME
@@ -301,12 +214,12 @@ async def create_account_start(update: Update, context: ContextTypes.DEFAULT_TYP
 async def process_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.message.text.strip().lower()
     if not re.match(r'^[a-zA-Z0-9._-]{3,30}$', username):
-        await update.message.reply_text("❌ Invalid! Try again:")
+        await update.message.reply_text("❌ Invalid! Try again (3-30 chars, letters/numbers only):")
         return ASKING_USERNAME
 
-    msg = await update.message.reply_text("🔄 Trying multiple email providers...")
+    msg = await update.message.reply_text("🔄 Creating your email...")
     user_id = update.effective_user.id
-    account = create_best_email(username)
+    account = EmailAPI.create_account(username)
 
     if account:
         data = get_user_data(user_id)
@@ -318,14 +231,14 @@ async def process_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ *Email Created!*\n\n"
             f"📧 *Email:* `{account['email']}`\n"
             f"🔑 *Password:* `{account['password']}`\n"
-            f"🌐 *Domain:* {account['domain']}\n"
-            f"🔧 *Provider:* {account['service']}\n\n"
-            f"✅ Works with social media\n"
-            f"📌 Use /inbox to check messages",
+            f"🌐 *Domain:* {account['domain']}\n\n"
+            f"✅ Can receive verification codes\n"
+            f"✅ Works with social media\n\n"
+            f"/inbox - Check messages",
             parse_mode='Markdown'
         )
     else:
-        await msg.edit_text("❌ All providers failed! Try a different username.")
+        await msg.edit_text("❌ Failed! Try a different username with /create")
     return ConversationHandler.END
 
 async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -333,98 +246,139 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_email, active_info = get_active(user_id)
 
     if not active_email:
-        msg = "❌ No active account! /create first."
-        if update.message:
-            await update.message.reply_text(msg)
-        else:
-            await update.callback_query.message.reply_text(msg)
+        await update.message.reply_text("❌ No active account! /create first.")
         return
 
-    if update.message:
-        status_msg = await update.message.reply_text("🔍 Fetching inbox...")
-    else:
-        status_msg = await update.callback_query.message.reply_text("🔍 Fetching inbox...")
+    msg = await update.message.reply_text("🔍 Fetching inbox...")
 
-    messages = get_messages(active_info)
+    # Refresh token if needed
+    new_token = EmailAPI.refresh_token(active_email, active_info['password'])
+    if new_token:
+        active_info['token'] = new_token
+
+    messages = EmailAPI.get_messages(active_info['token'])
 
     if messages:
-        text = f"📨 *Inbox - {active_email}*\n📊 Messages: {len(messages)}\n\n"
+        text = f"📨 *Inbox - {active_email}*\n📊 *Messages:* {len(messages)}\n\n"
         keyboard = []
         for i, m in enumerate(messages[:10], 1):
-            from_addr = m.get('from', {})
-            if isinstance(from_addr, dict):
-                from_addr = from_addr.get('address', 'Unknown')
+            from_addr = m.get('from', {}).get('address', 'Unknown')
             subject = m.get('subject', 'No subject')
-            msg_id = m.get('id', str(i))
-            
-            text += f"{i}. From: `{from_addr}`\n   Subject: {str(subject)[:50]}\n\n"
-            keyboard.append([InlineKeyboardButton(f"📖 View #{i}", callback_data=f'msg_{msg_id}')])
-        
+            text += f"{i}. From: `{from_addr}`\n   Subject: {subject[:50]}\n\n"
+            keyboard.append([InlineKeyboardButton(f"📖 View #{i}", callback_data=f'msg_{m["id"]}')])
         keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data='inbox')])
         keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data='start')])
     else:
         text = (
             f"📭 *Inbox Empty*\n"
             f"Email: `{active_email}`\n\n"
-            f"💡 Click 🔄 Refresh\n"
-            f"Wait 2-5 min for social media codes"
+            f"💡 Click 🔄 Refresh if you just signed up!"
         )
         keyboard = [
             [InlineKeyboardButton("🔄 Refresh Now", callback_data='inbox')],
             [InlineKeyboardButton("🏠 Menu", callback_data='start')]
         ]
 
-    await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def view_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
     user_id = update.effective_user.id
     _, active_info = get_active(user_id)
-    msg = await update.message.reply_text("📖 Loading...")
-    message = get_message_detail(active_info, msg_id)
+
+    msg = await update.message.reply_text("📖 Loading message...")
+    message = EmailAPI.get_message(active_info['token'], msg_id)
 
     if message:
-        from_addr = message.get('from', {})
-        if isinstance(from_addr, dict):
-            from_addr = from_addr.get('address', 'Unknown')
+        from_addr = message.get('from', {}).get('address', 'Unknown')
         subject = message.get('subject', 'No subject')
-        body = str(message.get('text') or message.get('html') or 'No content')[:1500]
+        body = (message.get('text') or message.get('html') or 'No content')
+        if len(body) > 1500:
+            body = body[:1500] + "..."
 
-        text = f"📧 *Message*\n*From:* `{from_addr}`\n*Subject:* {subject}\n\n{body}"
+        text = f"📧 *Message*\n\n*From:* `{from_addr}`\n*Subject:* {subject}\n\n{body}"
         keyboard = [
             [InlineKeyboardButton("🔙 Inbox", callback_data='inbox')],
             [InlineKeyboardButton("🏠 Menu", callback_data='start')]
         ]
         await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
-        await msg.edit_text("❌ Failed to load")
+        await msg.edit_text("❌ Failed to load message")
 
 async def myemails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = get_user_data(user_id)
     active_email, _ = get_active(user_id)
+
     if not data["accounts"]:
-        await update.message.reply_text("📭 No accounts!")
+        await update.message.reply_text("📭 No accounts! /create to make one.")
         return
+
     text = f"📋 *Your Emails*\n\n"
     for i, (email, info) in enumerate(data["accounts"].items(), 1):
         marker = "✅" if email == active_email else "📧"
         text += f"{i}. {marker} `{email}`\n   🔑 `{info['password']}`\n\n"
-    keyboard = [[InlineKeyboardButton("🔄 Switch", callback_data='switch')], [InlineKeyboardButton("🏠 Menu", callback_data='start')]]
+
+    keyboard = [
+        [InlineKeyboardButton("🔄 Switch", callback_data='switch')],
+        [InlineKeyboardButton("🏠 Menu", callback_data='start')]
+    ]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def switch_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = get_user_data(user_id)
     active_email, _ = get_active(user_id)
+
     if len(data["accounts"]) < 2:
-        await update.message.reply_text("❌ Need 2+ accounts!")
+        await update.message.reply_text(f"❌ Need 2+ accounts! You have {len(data['accounts'])}.")
         return
+
     keyboard = []
     for email in data["accounts"]:
         prefix = "✅ " if email == active_email else "📧 "
         keyboard.append([InlineKeyboardButton(f"{prefix}{email}", callback_data=f'sw_{email}')])
     keyboard.append([InlineKeyboardButton("🔙 Cancel", callback_data='start')])
-    await update.message.reply_text("🔄 Select:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    await update.message.reply_text("🔄 Select account:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def send_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    active_email, _ = get_active(user_id)
+    if not active_email:
+        await update.message.reply_text("❌ No active account!")
+        return ConversationHandler.END
+    await update.message.reply_text(f"📤 *Send Email*\nFrom: `{active_email}`\n\nEnter recipient:", parse_mode='Markdown')
+    return ASKING_RECIPIENT
+
+async def process_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    recipient = update.message.text.strip()
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', recipient):
+        await update.message.reply_text("❌ Invalid email! Try again:")
+        return ASKING_RECIPIENT
+    context.user_data['recipient'] = recipient
+    await update.message.reply_text("📝 Subject:")
+    return ASKING_SUBJECT
+
+async def process_subject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['subject'] = update.message.text.strip()
+    await update.message.reply_text("📄 Message:")
+    return ASKING_MESSAGE
+
+async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    active_email, active_info = get_active(user_id)
+    msg = await update.message.reply_text("📤 Sending...")
+    success = EmailAPI.send_email(
+        active_info['token'], active_email,
+        context.user_data['recipient'],
+        context.user_data['subject'],
+        update.message.text
+    )
+    if success:
+        await msg.edit_text(f"✅ Sent to `{context.user_data['recipient']}`!", parse_mode='Markdown')
+    else:
+        await msg.edit_text("❌ Failed!")
+    return ConversationHandler.END
 
 async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -442,17 +396,13 @@ async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📧 *Help*\n\n"
-        "/create - New email\n"
-        "/inbox - Check messages\n"
-        "/myemails - View all\n"
-        "/switch - Change account\n"
+        "📧 *Temp Mail Bot Help*\n\n"
+        "/start - Menu\n/create - New email\n"
+        "/inbox - Check messages\n/myemails - View all\n"
+        "/switch - Change account\n/send - Send\n"
         "/delete - Remove\n\n"
-        "✅ Multiple providers\n"
-        "✅ Auto-selects best domain\n"
-        "💡 Click 🔄 Refresh!",
-        parse_mode='Markdown'
-    )
+        "💡 Click 🔄 Refresh!"
+    , parse_mode='Markdown')
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Cancelled.")
@@ -472,6 +422,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await switch_button(query)
     elif data == 'inbox':
         await inbox_button(query)
+    elif data == 'send':
+        await query.message.reply_text("📤 Enter recipient:")
+        return ASKING_RECIPIENT
     elif data == 'delete':
         await delete_button(query)
     elif data == 'help':
@@ -495,7 +448,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if data_acc["active"] == email:
                 data_acc["active"] = next(iter(data_acc["accounts"])) if data_acc["accounts"] else None
             save_accounts(user_data)
-            await query.message.reply_text(f"🗑 Deleted", parse_mode='Markdown')
+            await query.message.reply_text(f"🗑 Deleted")
     elif data.startswith('msg_'):
         await view_message_button(query, data[4:])
 
@@ -533,37 +486,41 @@ async def inbox_button(query):
     if not active_email:
         await query.message.reply_text("❌ No active account!")
         return
-    msg = await query.message.reply_text("🔍 Fetching...")
-    messages = get_messages(active_info)
+    msg = await query.message.reply_text("🔍 Fetching inbox...")
+    
+    new_token = EmailAPI.refresh_token(active_email, active_info['password'])
+    if new_token:
+        active_info['token'] = new_token
+    
+    messages = EmailAPI.get_messages(active_info['token'])
+    
     if messages:
         text = f"📨 *Inbox*\n📊 {len(messages)} messages\n\n"
         keyboard = []
         for i, m in enumerate(messages[:10], 1):
-            from_addr = m.get('from', {})
-            if isinstance(from_addr, dict):
-                from_addr = from_addr.get('address', 'Unknown')
-            subject = m.get('subject', 'No subject')
-            msg_id = m.get('id', str(i))
-            text += f"{i}. `{from_addr}`\n   {str(subject)[:40]}\n\n"
-            keyboard.append([InlineKeyboardButton(f"📖 View #{i}", callback_data=f'msg_{msg_id}')])
+            from_addr = m.get('from', {}).get('address', 'Unknown')
+            subject = m.get('subject', 'No subject')[:40]
+            text += f"{i}. `{from_addr}`\n   {subject}\n\n"
+            keyboard.append([InlineKeyboardButton(f"📖 View #{i}", callback_data=f'msg_{m["id"]}')])
         keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data='inbox')])
         keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data='start')])
     else:
-        text = "📭 Empty\n💡 Click 🔄 Refresh!"
+        text = "📭 Empty\n\n💡 Click 🔄 Refresh!"
         keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data='inbox')], [InlineKeyboardButton("🏠 Menu", callback_data='start')]]
+    
     await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def view_message_button(query, msg_id):
     user_id = query.from_user.id
     _, active_info = get_active(user_id)
     msg = await query.message.reply_text("📖 Loading...")
-    message = get_message_detail(active_info, msg_id)
+    message = EmailAPI.get_message(active_info['token'], msg_id)
     if message:
-        from_addr = message.get('from', {})
-        if isinstance(from_addr, dict):
-            from_addr = from_addr.get('address', 'Unknown')
+        from_addr = message.get('from', {}).get('address', 'Unknown')
         subject = message.get('subject', 'No subject')
-        body = str(message.get('text') or message.get('html') or 'No content')[:1500]
+        body = (message.get('text') or message.get('html') or 'No content')
+        if len(body) > 1500:
+            body = body[:1500] + "..."
         text = f"📧 *Message*\n*From:* `{from_addr}`\n*Subject:* {subject}\n\n{body}"
         keyboard = [[InlineKeyboardButton("🔙 Inbox", callback_data='inbox')], [InlineKeyboardButton("🏠 Menu", callback_data='start')]]
         await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -585,18 +542,23 @@ async def delete_button(query):
     await query.message.reply_text("⚠️ Delete which?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def help_button(query):
-    await query.message.reply_text("📧 /create /inbox /myemails /switch /delete\n💡 Click 🔄 Refresh!", parse_mode='Markdown')
+    await query.message.reply_text("📧 /start /create /inbox /myemails /switch /send /delete\n💡 Click 🔄 Refresh!", parse_mode='Markdown')
 
 async def start_button(query):
     user_id = query.from_user.id
     data = get_user_data(user_id)
     active_email, active_info = get_active(user_id)
     total = len(data["accounts"])
-    keyboard = [[InlineKeyboardButton("➕ Create", callback_data='create')]]
+    keyboard = [
+        [InlineKeyboardButton("➕ Create", callback_data='create')],
+        [InlineKeyboardButton("📋 My Emails", callback_data='myemails')],
+    ]
     if total > 0:
-        keyboard.append([InlineKeyboardButton("📨 Inbox", callback_data='inbox'), InlineKeyboardButton("📋 My Emails", callback_data='myemails')])
+        keyboard.append([InlineKeyboardButton("📨 Inbox", callback_data='inbox'), InlineKeyboardButton("📤 Send", callback_data='send')])
     if total > 1:
         keyboard.append([InlineKeyboardButton("🔄 Switch", callback_data='switch')])
+    if total > 0:
+        keyboard.append([InlineKeyboardButton("🗑 Delete", callback_data='delete')])
     if active_email:
         text = f"📧 `{active_email}`\n📊 {total} accounts"
     else:
@@ -612,6 +574,16 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     
+    send_conv = ConversationHandler(
+        entry_points=[CommandHandler('send', send_email_start), CallbackQueryHandler(button_handler, pattern='^send$')],
+        states={
+            ASKING_RECIPIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_recipient)],
+            ASKING_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_subject)],
+            ASKING_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_message)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('myemails', myemails))
     app.add_handler(CommandHandler('switch', switch_account))
@@ -619,12 +591,12 @@ def main():
     app.add_handler(CommandHandler('delete', delete_account))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(create_conv)
+    app.add_handler(send_conv)
     app.add_handler(CallbackQueryHandler(button_handler))
     
     print("=" * 50)
-    print("📧 Temp Mail Bot Running!")
+    print("📧 Temp Mail Bot is running!")
     print("Bot: @ghost_mailbot")
-    print("Providers: tempmail.lol, mail.gw, mail.tm")
     print("=" * 50)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
