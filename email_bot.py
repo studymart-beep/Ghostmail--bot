@@ -4,11 +4,12 @@ import random
 import string
 import os
 import json
+import re
 from datetime import datetime
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 
 # ========== KEEP-ALIVE WEB SERVER ==========
 keep_alive_app = Flask(__name__)
@@ -32,6 +33,11 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8602213173:AAFaUOiaqdNWwQsAswjW3ba_7NQ5ocJ6U8M"
 ACCOUNTS_FILE = "email_accounts.json"
 
+# Conversation states
+ASKING_RECIPIENT = 1
+ASKING_SUBJECT = 2
+ASKING_BODY = 3
+
 def load_accounts():
     try:
         if os.path.exists(ACCOUNTS_FILE):
@@ -50,269 +56,127 @@ def save_accounts(data):
 
 user_data = load_accounts()
 
-class TempMailAPI:
-    """Handle temp mail with 4 providers"""
+class GuerrillaMailAPI:
+    """Guerrilla Mail API - Primary Provider"""
+    
+    BASE_URL = "https://api.guerrillamail.com/ajax.php"
     
     @staticmethod
     def create_account():
-        """Try all providers until one works"""
-        providers = [
-            TempMailAPI._try_guerrillamail,
-            TempMailAPI._try_tempmail_lol,
-            TempMailAPI._try_mailgw,
-            TempMailAPI._try_mailtm
-        ]
-        
-        for provider in providers:
-            try:
-                logger.info(f"Trying provider: {provider.__name__}")
-                account = provider()
-                if account:
-                    logger.info(f"Success with {provider.__name__}: {account['email']}")
-                    return account
-            except Exception as e:
-                logger.error(f"Provider {provider.__name__} failed: {e}")
-                continue
-        
-        logger.error("All providers failed!")
-        return None
-    
-    @staticmethod
-    def _try_guerrillamail():
-        """Provider 1: Guerrilla Mail - Most reliable"""
+        """Create a new Guerrilla Mail account"""
         try:
-            r = requests.get(
-                "https://api.guerrillamail.com/ajax.php?f=get_email_address&ip=127.0.0.1&agent=telegram_bot",
-                timeout=10
-            )
+            params = {
+                'f': 'get_email_address',
+                'ip': '127.0.0.1',
+                'agent': 'telegram_temp_mail_bot'
+            }
+            r = requests.get(GuerrillaMailAPI.BASE_URL, params=params, timeout=10)
             if r.status_code == 200:
                 data = r.json()
                 email = data.get('email_addr')
-                if email:
+                sid_token = data.get('sid_token')
+                
+                if email and sid_token:
+                    # Also set the email address
+                    params2 = {
+                        'f': 'set_email_user',
+                        'sid_token': sid_token,
+                        'email_user': email.split('@')[0]
+                    }
+                    requests.get(GuerrillaMailAPI.BASE_URL, params=params2, timeout=10)
+                    
                     return {
                         "email": email,
-                        "password": "no_password",
-                        "token": data.get('sid_token', ''),
+                        "password": "no_password_required",
+                        "token": sid_token,
                         "domain": email.split('@')[1],
                         "service": "guerrillamail",
                         "created": datetime.now().strftime("%Y-%m-%d %H:%M")
                     }
         except Exception as e:
-            logger.error(f"GuerrillaMail error: {e}")
+            logger.error(f"GuerrillaMail create error: {e}")
         return None
     
     @staticmethod
-    def _try_tempmail_lol():
-        """Provider 2: tempmail.lol"""
+    def get_messages(sid_token):
+        """Get inbox messages"""
         try:
-            r = requests.get("https://api.tempmail.lol/v2/inbox/create", timeout=10)
+            params = {
+                'f': 'get_email_list',
+                'offset': 0,
+                'sid_token': sid_token
+            }
+            r = requests.get(GuerrillaMailAPI.BASE_URL, params=params, timeout=10)
             if r.status_code == 200:
                 data = r.json()
-                email = data.get('address')
-                if email:
-                    return {
-                        "email": email,
-                        "password": "no_password",
-                        "token": data.get('token', ''),
-                        "domain": email.split('@')[1],
-                        "service": "tempmail.lol",
-                        "created": datetime.now().strftime("%Y-%m-%d %H:%M")
-                    }
+                messages = []
+                for m in data.get('list', []):
+                    messages.append({
+                        'id': m.get('mail_id'),
+                        'from': m.get('mail_from', 'Unknown'),
+                        'subject': m.get('mail_subject', 'No subject'),
+                        'date': m.get('mail_date', ''),
+                        'read': m.get('mail_read', 0)
+                    })
+                return messages
         except Exception as e:
-            logger.error(f"TempMail.lol error: {e}")
-        return None
-    
-    @staticmethod
-    def _try_mailgw():
-        """Provider 3: mail.gw"""
-        try:
-            r = requests.get("https://api.mail.gw/domains", timeout=10)
-            if r.status_code != 200:
-                return None
-            domains = r.json().get('hydra:member', [])
-            if not domains:
-                return None
-            
-            domain = random.choice(domains)['domain']
-            username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-            email = f"{username}@{domain}"
-            password = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
-            
-            r = requests.post(
-                "https://api.mail.gw/accounts",
-                json={"address": email, "password": password},
-                headers={"Content-Type": "application/json"},
-                timeout=10
-            )
-            if r.status_code not in [200, 201]:
-                return None
-            
-            r = requests.post(
-                "https://api.mail.gw/token",
-                json={"address": email, "password": password},
-                headers={"Content-Type": "application/json"},
-                timeout=10
-            )
-            if r.status_code != 200:
-                return None
-            
-            return {
-                "email": email, "password": password,
-                "token": r.json()['token'], "domain": domain,
-                "service": "mail.gw",
-                "created": datetime.now().strftime("%Y-%m-%d %H:%M")
-            }
-        except Exception as e:
-            logger.error(f"Mail.gw error: {e}")
-            return None
-    
-    @staticmethod
-    def _try_mailtm():
-        """Provider 4: mail.tm"""
-        try:
-            r = requests.get("https://api.mail.tm/domains", timeout=10)
-            if r.status_code != 200:
-                return None
-            domains = r.json().get('hydra:member', [])
-            if not domains:
-                return None
-            
-            domain = random.choice(domains)['domain']
-            username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-            email = f"{username}@{domain}"
-            password = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
-            
-            r = requests.post(
-                "https://api.mail.tm/accounts",
-                json={"address": email, "password": password},
-                headers={"Content-Type": "application/json"},
-                timeout=10
-            )
-            if r.status_code not in [200, 201]:
-                return None
-            
-            r = requests.post(
-                "https://api.mail.tm/token",
-                json={"address": email, "password": password},
-                headers={"Content-Type": "application/json"},
-                timeout=10
-            )
-            if r.status_code != 200:
-                return None
-            
-            return {
-                "email": email, "password": password,
-                "token": r.json()['token'], "domain": domain,
-                "service": "mail.tm",
-                "created": datetime.now().strftime("%Y-%m-%d %H:%M")
-            }
-        except Exception as e:
-            logger.error(f"Mail.tm error: {e}")
-            return None
-    
-    @staticmethod
-    def get_messages(account):
-        """Get messages based on service"""
-        service = account.get('service', '')
-        
-        if service == 'guerrillamail':
-            try:
-                params = {
-                    'f': 'get_email_list',
-                    'offset': 0,
-                    'sid_token': account['token']
-                }
-                r = requests.get("https://api.guerrillamail.com/ajax.php", params=params, timeout=10)
-                if r.status_code == 200:
-                    messages = []
-                    for m in r.json().get('list', []):
-                        messages.append({
-                            'id': m.get('mail_id'),
-                            'from': m.get('mail_from', 'Unknown'),
-                            'subject': m.get('mail_subject', 'No subject')
-                        })
-                    return messages
-            except:
-                pass
-            return []
-        
-        if service == 'tempmail.lol':
-            try:
-                r = requests.get(f"https://api.tempmail.lol/v2/inbox?token={account['token']}", timeout=10)
-                if r.status_code == 200:
-                    return [
-                        {
-                            'id': e.get('id'),
-                            'from': {'address': e.get('from', 'Unknown')},
-                            'subject': e.get('subject', 'No subject')
-                        }
-                        for e in r.json().get('emails', [])
-                    ]
-            except:
-                pass
-            return []
-        
-        # mail.tm and mail.gw
-        base = "https://api.mail.gw" if service == 'mail.gw' else "https://api.mail.tm"
-        try:
-            headers = {"Authorization": f"Bearer {account['token']}"}
-            r = requests.get(f"{base}/messages", headers=headers, timeout=10)
-            if r.status_code == 200:
-                return r.json().get('hydra:member', [])
-        except:
-            pass
+            logger.error(f"Get messages error: {e}")
         return []
     
     @staticmethod
-    def get_message(account, msg_id):
-        """Get specific message"""
-        service = account.get('service', '')
-        
-        if service == 'guerrillamail':
-            try:
-                params = {
-                    'f': 'fetch_email',
-                    'email_id': msg_id,
-                    'sid_token': account['token']
-                }
-                r = requests.get("https://api.guerrillamail.com/ajax.php", params=params, timeout=10)
-                if r.status_code == 200:
-                    msg = r.json()
-                    return {
-                        'from': {'address': msg.get('mail_from', 'Unknown')},
-                        'subject': msg.get('mail_subject', 'No subject'),
-                        'text': msg.get('mail_body', 'No content')
-                    }
-            except:
-                pass
-            return None
-        
-        if service == 'tempmail.lol':
-            try:
-                r = requests.get(f"https://api.tempmail.lol/v2/inbox?token={account['token']}&id={msg_id}", timeout=10)
-                if r.status_code == 200:
-                    emails = r.json().get('emails', [])
-                    if emails:
-                        e = emails[0]
-                        return {
-                            'from': {'address': e.get('from', 'Unknown')},
-                            'subject': e.get('subject', 'No subject'),
-                            'text': e.get('body', 'No content')
-                        }
-            except:
-                pass
-            return None
-        
-        # mail.tm and mail.gw
-        base = "https://api.mail.gw" if service == 'mail.gw' else "https://api.mail.tm"
+    def get_message(sid_token, msg_id):
+        """Get specific message content"""
         try:
-            headers = {"Authorization": f"Bearer {account['token']}"}
-            r = requests.get(f"{base}/messages/{msg_id}", headers=headers, timeout=10)
+            params = {
+                'f': 'fetch_email',
+                'email_id': msg_id,
+                'sid_token': sid_token
+            }
+            r = requests.get(GuerrillaMailAPI.BASE_URL, params=params, timeout=10)
             if r.status_code == 200:
-                return r.json()
-        except:
-            pass
+                msg = r.json()
+                return {
+                    'from': msg.get('mail_from', 'Unknown'),
+                    'subject': msg.get('mail_subject', 'No subject'),
+                    'text': msg.get('mail_body', 'No content'),
+                    'html': msg.get('mail_html', ''),
+                    'date': msg.get('mail_date', '')
+                }
+        except Exception as e:
+            logger.error(f"Get message error: {e}")
         return None
+    
+    @staticmethod
+    def send_email(sid_token, to_addr, subject, body):
+        """Send email from Guerrilla Mail account"""
+        try:
+            # First get the current email address
+            params = {
+                'f': 'get_email_address',
+                'sid_token': sid_token
+            }
+            r = requests.get(GuerrillaMailAPI.BASE_URL, params=params, timeout=10)
+            if r.status_code != 200:
+                return False
+            
+            from_email = r.json().get('email_addr')
+            
+            # Compose and send
+            params = {
+                'f': 'send_email',
+                'sid_token': sid_token,
+                'to': to_addr,
+                'subject': subject,
+                'body': body
+            }
+            r = requests.post(GuerrillaMailAPI.BASE_URL, data=params, timeout=15)
+            if r.status_code == 200:
+                result = r.json()
+                return result.get('status') == 'success'
+        except Exception as e:
+            logger.error(f"Send email error: {e}")
+        return False
+
 
 def get_user_data(user_id):
     user_id = str(user_id)
@@ -333,12 +197,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_email, active_info = get_active(user_id)
     total = len(data.get("accounts", {}))
     
-    keyboard = [[InlineKeyboardButton("➕ Create Email", callback_data='create')]]
+    keyboard = [
+        [InlineKeyboardButton("➕ Create Email", callback_data='create')],
+    ]
     if total > 0:
         keyboard.append([
             InlineKeyboardButton("📨 Inbox", callback_data='inbox'),
-            InlineKeyboardButton("📋 My Emails", callback_data='myemails')
+            InlineKeyboardButton("📤 Send Email", callback_data='send')
         ])
+        keyboard.append([InlineKeyboardButton("📋 My Emails", callback_data='myemails')])
     if total > 1:
         keyboard.append([InlineKeyboardButton("🔄 Switch", callback_data='switch')])
     if total > 0:
@@ -349,29 +216,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"📧 *Temp Mail Bot*\n\n"
             f"📧 *Active:* `{active_email}`\n"
-            f"🔑 *Pass:* `{active_info['password']}`\n"
             f"🔧 *Provider:* {active_info.get('service', 'N/A')}\n"
             f"📊 *Your Accounts:* {total}\n"
             f"👥 *Total Users:* {len(user_data)}\n\n"
-            f"✅ 4 providers available\n"
+            f"✅ Send & Receive emails\n"
+            f"✅ Works with social media\n\n"
             f"/create - New email\n"
-            f"/inbox - Check messages"
+            f"/inbox - Check messages\n"
+            f"/send - Send email"
         )
     else:
         text = (
             f"📧 *Temp Mail Bot*\n\n"
             f"Create free temp emails!\n"
-            f"4 providers: always works!\n\n"
+            f"Send & Receive messages\n\n"
             f"/create to get started!"
         )
     
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def create_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🔄 Trying 4 providers...")
+    msg = await update.message.reply_text("🔄 Creating your email...")
     
     user_id = update.effective_user.id
-    account = TempMailAPI.create_account()
+    account = GuerrillaMailAPI.create_account()
     
     if account:
         data = get_user_data(user_id)
@@ -382,16 +250,18 @@ async def create_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(
             f"✅ *Email Created!*\n\n"
             f"📧 *Email:* `{account['email']}`\n"
-            f"🔑 *Password:* `{account['password']}`\n"
-            f"🔧 *Provider:* {account['service']}\n"
-            f"🌐 *Domain:* {account['domain']}\n\n"
-            f"✅ Works on most platforms\n"
-            f"/inbox - Check messages",
+            f"🔧 *Provider:* Guerrilla Mail\n"
+            f"🌐 *Domain:* {account['domain']}\n"
+            f"📅 *Created:* {account['created']}\n\n"
+            f"✅ Send & Receive emails\n"
+            f"✅ Works on most platforms\n\n"
+            f"/inbox - Check messages\n"
+            f"/send - Send email",
             parse_mode='Markdown'
         )
     else:
         await msg.edit_text(
-            "❌ *All 4 providers failed!*\n"
+            "❌ *Failed to create email*\n"
             "Please try again in a few seconds.",
             parse_mode='Markdown'
         )
@@ -405,17 +275,16 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     msg = await update.message.reply_text("🔍 Checking inbox...")
-    messages = TempMailAPI.get_messages(active_info)
+    messages = GuerrillaMailAPI.get_messages(active_info['token'])
     
     if messages:
         text = f"📨 *Inbox - {active_email}*\n📊 Messages: {len(messages)}\n\n"
         keyboard = []
         for i, m in enumerate(messages[:10], 1):
-            from_addr = m.get('from', {})
-            if isinstance(from_addr, dict):
-                from_addr = from_addr.get('address', 'Unknown')
+            from_addr = m.get('from', 'Unknown')
             subject = m.get('subject', 'No subject')
-            text += f"{i}. From: `{from_addr}`\n   Subject: {str(subject)[:50]}\n\n"
+            unread = "🔵" if m.get('read') == 0 else "⚪"
+            text += f"{i}. {unread} From: `{from_addr[:40]}`\n   Subject: {str(subject)[:50]}\n\n"
             keyboard.append([InlineKeyboardButton(f"📖 View #{i}", callback_data=f'msg_{m["id"]}')])
         keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data='inbox')])
         keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data='start')])
@@ -430,15 +299,18 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def view_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_id: str):
     _, active_info = get_active(update.effective_user.id)
-    msg = await update.message.reply_text("📖 Loading...")
-    message = TempMailAPI.get_message(active_info, msg_id)
+    msg = await update.message.reply_text("📖 Loading message...")
+    message = GuerrillaMailAPI.get_message(active_info['token'], msg_id)
     
     if message:
-        from_addr = message.get('from', {})
-        if isinstance(from_addr, dict):
-            from_addr = from_addr.get('address', 'Unknown')
         body = str(message.get('text', 'No content'))[:1500]
-        text = f"📧 *Message*\n\n*From:* `{from_addr}`\n*Subject:* {message.get('subject', 'No subject')}\n\n{body}"
+        text = (
+            f"📧 *Message*\n\n"
+            f"*From:* `{message.get('from', 'Unknown')}`\n"
+            f"*Subject:* {message.get('subject', 'No subject')}\n"
+            f"*Date:* {message.get('date', 'Unknown')}\n\n"
+            f"{body}"
+        )
         keyboard = [
             [InlineKeyboardButton("🔙 Inbox", callback_data='inbox')],
             [InlineKeyboardButton("🏠 Menu", callback_data='start')]
@@ -446,6 +318,75 @@ async def view_message(update: Update, context: ContextTypes.DEFAULT_TYPE, msg_i
         await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
         await msg.edit_text("❌ Failed to load message")
+
+async def send_email_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    active_email, _ = get_active(user_id)
+    
+    if not active_email:
+        await update.message.reply_text("❌ No active account! Use /create first.")
+        return ConversationHandler.END
+    
+    await update.message.reply_text(
+        f"📤 *Send Email*\n"
+        f"From: `{active_email}`\n\n"
+        f"Enter recipient email address:",
+        parse_mode='Markdown'
+    )
+    return ASKING_RECIPIENT
+
+async def process_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    recipient = update.message.text.strip()
+    
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', recipient):
+        await update.message.reply_text("❌ Invalid email! Please enter a valid email:")
+        return ASKING_RECIPIENT
+    
+    context.user_data['recipient'] = recipient
+    await update.message.reply_text("📝 Enter subject:")
+    return ASKING_SUBJECT
+
+async def process_subject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    subject = update.message.text.strip()
+    if not subject:
+        await update.message.reply_text("❌ Subject cannot be empty! Enter subject:")
+        return ASKING_SUBJECT
+    
+    context.user_data['subject'] = subject
+    await update.message.reply_text("📄 Enter message body:")
+    return ASKING_BODY
+
+async def process_body(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    body = update.message.text.strip()
+    if not body:
+        await update.message.reply_text("❌ Message cannot be empty! Enter message:")
+        return ASKING_BODY
+    
+    user_id = update.effective_user.id
+    _, active_info = get_active(user_id)
+    
+    msg = await update.message.reply_text("📤 Sending email...")
+    
+    success = GuerrillaMailAPI.send_email(
+        active_info['token'],
+        context.user_data['recipient'],
+        context.user_data['subject'],
+        body
+    )
+    
+    if success:
+        await msg.edit_text(
+            f"✅ *Email Sent!*\n\n"
+            f"📧 From: `{active_info['email']}`\n"
+            f"📨 To: `{context.user_data['recipient']}`\n"
+            f"📝 Subject: {context.user_data['subject']}\n\n"
+            f"📄 Message:\n{body[:200]}{'...' if len(body) > 200 else ''}",
+            parse_mode='Markdown'
+        )
+    else:
+        await msg.edit_text("❌ Failed to send email. Please try again.")
+    
+    return ConversationHandler.END
 
 async def myemails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -459,7 +400,7 @@ async def myemails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "📋 *Your Emails*\n\n"
     for i, (email, info) in enumerate(data["accounts"].items(), 1):
         marker = "✅" if email == active_email else "📧"
-        text += f"{i}. {marker} `{email}`\n   🔑 `{info['password']}`\n   🔧 {info.get('service', 'N/A')}\n\n"
+        text += f"{i}. {marker} `{email}`\n   🔧 {info.get('service', 'N/A')}\n   📅 {info.get('created', 'N/A')}\n\n"
     
     keyboard = [
         [InlineKeyboardButton("🔄 Switch", callback_data='switch')],
@@ -502,28 +443,44 @@ async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📧 *Temp Mail Bot*\n\n"
-        "/create - New email (4 providers)\n"
+        "/start - Main menu\n"
+        "/create - Create new email\n"
         "/inbox - Check messages\n"
+        "/send - Send email\n"
         "/myemails - View accounts\n"
         "/switch - Change account\n"
         "/delete - Remove account\n"
         "/help - This message\n\n"
-        "✅ 4 providers for reliability",
+        "✅ Guerrilla Mail Provider\n"
+        "✅ Send & Receive emails",
         parse_mode='Markdown'
     )
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     
-    if data == 'create': await create_email(update, context)
-    elif data == 'inbox': await inbox(update, context)
-    elif data == 'myemails': await myemails(update, context)
-    elif data == 'switch': await switch_account(update, context)
-    elif data == 'delete': await delete_account(update, context)
-    elif data == 'help': await help_command(update, context)
-    elif data == 'start': await start(update, context)
+    if data == 'create':
+        await create_email(update, context)
+    elif data == 'inbox':
+        await inbox(update, context)
+    elif data == 'send':
+        await send_email_start(update, context)
+    elif data == 'myemails':
+        await myemails(update, context)
+    elif data == 'switch':
+        await switch_account(update, context)
+    elif data == 'delete':
+        await delete_account(update, context)
+    elif data == 'help':
+        await help_command(update, context)
+    elif data == 'start':
+        await start(update, context)
     elif data.startswith('sw_'):
         email = data[3:]
         user_id = query.from_user.id
@@ -549,6 +506,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     start_keep_alive()
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Conversation handler for sending emails
+    send_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler('send', send_email_start),
+            CallbackQueryHandler(button_handler, pattern='^send$')
+        ],
+        states={
+            ASKING_RECIPIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_recipient)],
+            ASKING_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_subject)],
+            ASKING_BODY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_body)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('create', create_email))
     app.add_handler(CommandHandler('inbox', inbox))
@@ -556,8 +528,11 @@ def main():
     app.add_handler(CommandHandler('switch', switch_account))
     app.add_handler(CommandHandler('delete', delete_account))
     app.add_handler(CommandHandler('help', help_command))
+    app.add_handler(send_conv)
     app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 Bot is running with 4 providers!")
+    
+    print("🤖 Bot is running with Guerrilla Mail!")
+    print("✅ Send & Receive emails enabled")
     app.run_polling()
 
 if __name__ == '__main__':
